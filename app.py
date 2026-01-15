@@ -10,7 +10,7 @@ import edge_tts
 
 
 # ----------------------------
-# Styling (All-Blue Gradient Theme) - same as your style
+# Styling (All-Blue Gradient Theme)
 # ----------------------------
 st.set_page_config(
     page_title="Text to Audio Tool for Training and Upskilling",
@@ -65,43 +65,48 @@ st.markdown(
 
 
 # ----------------------------
+# Async helper (Streamlit Cloud safe)
+# ----------------------------
+def run_async(coro):
+    """
+    Run an async coroutine safely in Streamlit (works even if an event loop is already running).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # If we get here, a loop is already running -> run in a new loop
+        new_loop = asyncio.new_event_loop()
+        try:
+            return new_loop.run_until_complete(coro)
+        finally:
+            new_loop.close()
+    except RuntimeError:
+        # No running loop
+        return asyncio.run(coro)
+
+
+# ----------------------------
 # Helpers
 # ----------------------------
 def pct_to_edge_rate(pct: int) -> str:
-    """
-    Edge-TTS expects rate like '+10%' or '-15%'
-    We'll map 100..250 (your slider) to -50%..+50% (reasonable range).
-    """
-    # slider 100..250 -> scale 0..150
-    # map to -50..+50
-    val = int(round(((pct - 175) / 75) * 50))  # 175 is mid-ish
+    # slider 100..250 -> map to -50%..+50%
+    val = int(round(((pct - 175) / 75) * 50))
     val = max(-50, min(50, val))
     return f"{val:+d}%"
 
 def volume_to_edge(vol: float) -> str:
-    """
-    Edge-TTS volume: '+0%'..'+100%' (or negative). We'll map 0..1 to -50%..+0%
-    but easiest: keep around +0% and let playback control volume in browser/player.
-    We'll still support a small range: 0..1 -> -50%..+0%
-    """
-    val = int(round((vol - 1.0) * 50))  # 1.0 -> 0%, 0.0 -> -50%
+    # 0..1 -> -50%..+0%
+    val = int(round((vol - 1.0) * 50))
     val = max(-50, min(0, val))
     return f"{val:+d}%"
 
-async def list_voices_async():
-    voices = await edge_tts.list_voices()
-    return voices
-
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
 def get_voices_cached():
-    # Cache voices in session_state
-    if "edge_voices" not in st.session_state:
-        st.session_state.edge_voices = asyncio.run(list_voices_async())
-    return st.session_state.edge_voices
+    # Cache voices for 24h (faster on Cloud)
+    return run_async(edge_tts.list_voices())
 
 def filter_voice_list(voices, prefer_lang="en-US", prefer_female=True):
     out = []
     for v in voices:
-        short = v.get("ShortName", "")
         locale = v.get("Locale", "")
         gender = (v.get("Gender", "") or "").lower()
         if prefer_lang and locale != prefer_lang:
@@ -109,7 +114,8 @@ def filter_voice_list(voices, prefer_lang="en-US", prefer_female=True):
         if prefer_female and gender != "female":
             continue
         out.append(v)
-    # fallback: if none match strict filter
+
+    # fallback
     if not out:
         out = [v for v in voices if v.get("Locale") == prefer_lang] if prefer_lang else voices
     if not out:
@@ -131,7 +137,6 @@ async def synthesize_edge_tts(text: str, voice_short_name: str, rate_str: str, v
 # ----------------------------
 st.markdown('<div class="card">', unsafe_allow_html=True)
 
-# Voice preferences
 c1, c2 = st.columns([1, 1])
 with c1:
     prefer_lang = st.selectbox("Language", ["en-US", "Any"], index=0)
@@ -145,16 +150,11 @@ filtered = filter_voice_list(
     prefer_female=(prefer_gender == "Female")
 )
 
-# Build friendly labels
-# Typical ShortName: "en-US-JennyNeural"
-# Friendly: "Jenny (Neural) — en-US"
 def nice_label(v):
     sn = v.get("ShortName", "")
     locale = v.get("Locale", "")
     gender = v.get("Gender", "")
-    # Extract the person name part
     name_part = sn.split("-")[-1] if "-" in sn else sn
-    # Split "JennyNeural" into "Jenny (Neural)"
     if name_part.lower().endswith("neural"):
         base = name_part[:-6]
         display = f"{base} (Neural)"
@@ -167,8 +167,7 @@ voice_map = {nice_label(v): v for v in filtered}
 # Default: prefer Jenny/Aria if available
 default_label = None
 for key in voice_map.keys():
-    lk = key.lower()
-    if "jenny" in lk:
+    if "jenny" in key.lower():
         default_label = key
         break
 if default_label is None:
@@ -179,7 +178,11 @@ if default_label is None:
 if default_label is None:
     default_label = list(voice_map.keys())[0]
 
-voice_choice = st.selectbox("Voice", list(voice_map.keys()), index=list(voice_map.keys()).index(default_label))
+voice_choice = st.selectbox(
+    "Voice",
+    list(voice_map.keys()),
+    index=list(voice_map.keys()).index(default_label)
+)
 
 text = st.text_area(
     "Text",
@@ -189,7 +192,6 @@ text = st.text_area(
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    # Keep your slider range but interpret it for Edge rate
     rate_slider = st.slider("Speech Rate", 100, 250, 180, step=5)
 with col2:
     volume = st.slider("Volume", 0.0, 1.0, 1.0, step=0.05)
@@ -225,7 +227,7 @@ if generate:
             out_path = Path(tmp) / "out.mp3"
 
             with st.spinner("Generating audio (Edge Neural TTS)..."):
-                asyncio.run(synthesize_edge_tts(text, voice_short, rate_str, volume_str, out_path))
+                run_async(synthesize_edge_tts(text, voice_short, rate_str, volume_str, out_path))
 
             audio_bytes = out_path.read_bytes()
             if len(audio_bytes) < 2000:
@@ -241,6 +243,5 @@ if generate:
                 mime="audio/mpeg",
                 use_container_width=True
             )
-
     finally:
         st.session_state.busy = False
